@@ -1,0 +1,115 @@
+!pip install torchtext==0.15.2  # Install torchtext
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader, random_split
+import torchtext.vocab as vocab  # Import vocab from torchtext
+import numpy as np
+
+# Set random seed for reproducibility
+torch.manual_seed(42)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Step 1: Load 100-dimensional GloVe embeddings
+print("Loading GloVe embeddings...")
+glove = vocab.GloVe(name='6B', dim=100)  # Download 100-dim GloVe embeddings
+embedding_dim = 100
+
+class TextDataset(Dataset):
+    def __init__(self, texts, labels, vocab, max_length=50):
+        self.texts = texts
+        self.labels = labels
+        self.vocab = vocab
+        self.max_length = max_length
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+        label = self.labels[idx]
+        # Convert text to indices
+        tokens = text.split()[:self.max_length]  # Truncate to max_length
+        indices = [self.vocab.stoi.get(token, 0) for token in tokens]  # 0 for unknown tokens
+        # Pad if shorter than max_length
+        indices = indices + [0] * (self.max_length - len(indices)) if len(indices) < self.max_length else indices
+        return torch.tensor(indices, dtype=torch.long), torch.tensor(label, dtype=torch.long)
+
+texts = ["good movie", "bad film", "great story", "terrible plot"] * 100  # 400 samples
+labels = [1, 0, 1, 0] * 100  # Binary labels (positive=1, negative=0)
+max_sequence_length = 10  # Adjust based on your data
+dataset = TextDataset(texts, labels, glove, max_length=max_sequence_length)
+
+# Step 2: Split dataset and create DataLoaders
+train_size = int(0.7 * len(dataset))
+valid_size = int(0.15 * len(dataset))
+test_size = len(dataset) - train_size - valid_size
+train_data, valid_data, test_data = random_split(dataset, [train_size, valid_size, test_size])
+
+train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
+valid_loader = DataLoader(valid_data, batch_size=32, shuffle=False)
+test_loader = DataLoader(test_data, batch_size=32, shuffle=False)
+
+# Create embedding matrix
+vocab_size = len(glove.stoi)
+embedding_matrix = torch.zeros(vocab_size, embedding_dim)
+for i, token in enumerate(glove.stoi):
+    embedding_matrix[i] = glove.vectors[glove.stoi[token]]
+
+# Step 3: Define the neural network model
+mymodel = nn.Sequential(
+    nn.Embedding.from_pretrained(embedding_matrix, freeze=True),  
+    nn.Flatten(),  # Flatten: (batch_size, max_sequence_length, embedding_dim) -> (batch_size, max_sequence_length * embedding_dim)
+    nn.Linear(embedding_dim * max_sequence_length, 128),          
+    nn.ReLU(),                                                  
+    nn.Linear(128, 2),                                           
+).to(device)
+
+# Training function
+def train_model(model, train_loader, valid_loader, epochs=10):
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0
+        for inputs, labels in train_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+
+        # Validation accuracy
+        val_acc = get_accuracy(model, valid_loader)
+        print(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(train_loader):.4f}, Val Accuracy: {val_acc:.4f}")
+
+# Accuracy function
+def get_accuracy(model, data_loader):
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for inputs, labels in data_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            _, predicted = torch.max(outputs, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+    return correct / total
+
+# Train the model
+print("Training model...")
+train_model(mymodel, train_loader, valid_loader, epochs=5)
+
+# Evaluate on test set
+test_accuracy = get_accuracy(mymodel, test_loader)
+print("Final test accuracy:", test_accuracy)
+
+# Compare with a hypothetical previous model (e.g., 50-dim GloVe)
+# Assuming previous test accuracy was 0.75 (replace with your actual value)
+previous_test_accuracy = 0.75
+print(f"Comparison: 100-dim GloVe Test Accuracy ({test_accuracy:.4f}) vs 50-dim GloVe Test Accuracy ({previous_test_accuracy:.4f})")
